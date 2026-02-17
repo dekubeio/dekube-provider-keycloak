@@ -68,6 +68,24 @@ def _decode_secret_data(sec):
     return result
 
 
+def _build_volume_source_map(volumes):
+    """Map volume names to their source type (configmap or secret)."""
+    vol_map = {}
+    for v in volumes:
+        vname = v.get("name", "")
+        if "configMap" in v:
+            vol_map[vname] = {
+                "type": "configmap",
+                "name": v["configMap"].get("name", ""),
+            }
+        elif "secret" in v:
+            vol_map[vname] = {
+                "type": "secret",
+                "name": v["secret"].get("secretName", ""),
+            }
+    return vol_map
+
+
 def _build_pod_template_volumes(spec, ctx):
     """Process volume mounts from unsupported.podTemplate.spec."""
     pod_spec = (spec.get("unsupported", {})
@@ -86,22 +104,8 @@ def _build_pod_template_volumes(spec, ctx):
     if not mounts:
         return []
 
-    # Build volume name → source map
-    vol_map = {}
-    for v in volumes:
-        vname = v.get("name", "")
-        if "configMap" in v:
-            vol_map[vname] = {
-                "type": "configmap",
-                "name": v["configMap"].get("name", ""),
-            }
-        elif "secret" in v:
-            vol_map[vname] = {
-                "type": "secret",
-                "name": v["secret"].get("secretName", ""),
-            }
+    vol_map = _build_volume_source_map(volumes)
 
-    # Process each mount
     result = []
     for vm in mounts:
         source = vol_map.get(vm.get("name", ""))
@@ -316,22 +320,30 @@ def _build_options_env(spec, ctx, kc_name="keycloak"):
                 if "value" in e:
                     env[e["name"]] = e["value"]
 
+    env.update(_resolve_bootstrap_admin(spec, ctx, kc_name))
+    return env
+
+
+def _resolve_bootstrap_admin(spec, ctx, kc_name):
+    """Resolve bootstrap admin credentials from CRD or generate them."""
     admin_secret = (spec.get("bootstrapAdmin", {})
                     .get("user", {}).get("secret"))
     if admin_secret:
+        env = {}
         for field, env_key in [("username", "KC_BOOTSTRAP_ADMIN_USERNAME"),
                                ("password", "KC_BOOTSTRAP_ADMIN_PASSWORD")]:
             val = _secret_val(ctx, admin_secret, field)
             if val:
                 env[env_key] = val
-    else:
-        # No bootstrapAdmin in CRD — K8s operator creates it dynamically.
-        # Replicate: generate credentials, write to secrets/ like a K8s Secret.
-        creds = _ensure_initial_admin(
-            kc_name, ctx.output_dir, ctx.generated_secrets)
-        env["KC_BOOTSTRAP_ADMIN_USERNAME"] = creds["username"]
-        env["KC_BOOTSTRAP_ADMIN_PASSWORD"] = creds["password"]
-    return env
+        return env
+    # No bootstrapAdmin in CRD — K8s operator creates it dynamically.
+    # Replicate: generate credentials, write to secrets/ like a K8s Secret.
+    creds = _ensure_initial_admin(
+        kc_name, ctx.output_dir, ctx.generated_secrets)
+    return {
+        "KC_BOOTSTRAP_ADMIN_USERNAME": creds["username"],
+        "KC_BOOTSTRAP_ADMIN_PASSWORD": creds["password"],
+    }
 
 
 def _build_env(spec, ctx, kc_name="keycloak"):
@@ -346,6 +358,33 @@ def _build_env(spec, ctx, kc_name="keycloak"):
     env.setdefault("KC_METRICS_ENABLED", "true")
     env.update(_build_options_env(spec, ctx, kc_name))
     return env
+
+
+def _build_service_ports(env, tls_enabled):
+    """Build K8s-style Service port list from Keycloak env vars."""
+    svc_ports = []
+    if tls_enabled:
+        https_port = int(env.get("KC_HTTPS_PORT", 8443))
+        svc_ports.append({"name": "https", "port": https_port,
+                          "targetPort": https_port})
+    http_enabled = env.get("KC_HTTP_ENABLED", "false") == "true"
+    if http_enabled or not tls_enabled:
+        http_port = int(env.get("KC_HTTP_PORT", 8080))
+        svc_ports.append({"name": "http", "port": http_port,
+                          "targetPort": http_port})
+    if "KC_HTTP_MANAGEMENT_PORT" in env:
+        mgmt_port = int(env["KC_HTTP_MANAGEMENT_PORT"])
+        svc_ports.append({"name": "management", "port": mgmt_port,
+                          "targetPort": mgmt_port})
+    else:
+        # No dedicated management port — metrics served on main listener.
+        # Map "management" to the main port so ServiceMonitors referencing
+        # port "management" resolve.
+        main_port = (int(env.get("KC_HTTPS_PORT", 8443)) if tls_enabled
+                     else int(env.get("KC_HTTP_PORT", 8080)))
+        svc_ports.append({"name": "management", "port": main_port,
+                          "targetPort": main_port})
+    return svc_ports
 
 
 # ---- converter class -------------------------------------------------------
@@ -425,29 +464,7 @@ class KeycloakConverter:
             # servicemonitor) can discover this service by label matching.
             # In K8s the Keycloak Operator creates the Service at runtime;
             # here we replicate what it would look like.
-            svc_ports = []
-            tls_enabled = bool(tls_secret)
-            if tls_enabled:
-                https_port = int(env.get("KC_HTTPS_PORT", 8443))
-                svc_ports.append({"name": "https", "port": https_port,
-                                  "targetPort": https_port})
-            http_enabled = env.get("KC_HTTP_ENABLED", "false") == "true"
-            if http_enabled or not tls_enabled:
-                http_port = int(env.get("KC_HTTP_PORT", 8080))
-                svc_ports.append({"name": "http", "port": http_port,
-                                  "targetPort": http_port})
-            if "KC_HTTP_MANAGEMENT_PORT" in env:
-                mgmt_port = int(env["KC_HTTP_MANAGEMENT_PORT"])
-                svc_ports.append({"name": "management", "port": mgmt_port,
-                                  "targetPort": mgmt_port})
-            else:
-                # No dedicated management port — metrics served on main
-                # listener. Map "management" to the main port so
-                # ServiceMonitors referencing port "management" resolve.
-                main_port = (int(env.get("KC_HTTPS_PORT", 8443)) if tls_enabled
-                             else int(env.get("KC_HTTP_PORT", 8080)))
-                svc_ports.append({"name": "management", "port": main_port,
-                                  "targetPort": main_port})
+            svc_ports = _build_service_ports(env, bool(tls_secret))
             ns = m.get("metadata", {}).get("namespace", "")
             ctx.services_by_selector[name] = {
                 "name": name,
