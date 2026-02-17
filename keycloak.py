@@ -397,7 +397,7 @@ class KeycloakConverter:
     """
 
     kinds = ["KeycloakRealmImport", "Keycloak"]
-    priority = 50  # after trust-manager (needs CA bundle configmap)
+    priority = 50  # after cert-manager/trust-manager if present (uses their output when available)
 
     def __init__(self):
         self._realm_imports = {}   # keycloakCRName → [manifest]
