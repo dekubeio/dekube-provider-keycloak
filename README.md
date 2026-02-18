@@ -2,7 +2,7 @@
 
 ![vibe coded](https://img.shields.io/badge/vibe-coded-ff69b4)
 ![python 3](https://img.shields.io/badge/python-3-3776AB)
-![heresy: 7/10](https://img.shields.io/badge/heresy-7%2F10-red)
+![heresy: 3/10](https://img.shields.io/badge/heresy-3%2F10-green)
 ![stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![public domain](https://img.shields.io/badge/license-public%20domain-brightgreen)
 
