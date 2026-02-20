@@ -16,7 +16,7 @@ import secrets
 import string
 import sys
 
-from helmfile2compose import ConvertResult, Provider, apply_replacements
+from h2c import ConvertResult, Provider, apply_replacements
 
 
 # ---- helpers ---------------------------------------------------------------
