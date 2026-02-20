@@ -37,7 +37,7 @@ Replaces the Keycloak Operator's reconciliation logic with a direct compose serv
 
 ## Priority
 
-`50` -- runs after trust-manager (which provides CA bundle ConfigMaps that Keycloak may mount via podTemplate).
+`500` -- runs after cert-manager/trust-manager if present (uses their output when available).
 
 ## Dependencies
 
