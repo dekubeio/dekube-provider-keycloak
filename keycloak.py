@@ -16,7 +16,7 @@ import secrets
 import string
 import sys
 
-from h2c import ConvertResult, Provider, apply_replacements
+from h2c import ProviderResult, Provider, apply_replacements
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -406,7 +406,7 @@ class KeycloakProvider(Provider):
     def convert(self, kind, manifests, ctx):
         if kind == "KeycloakRealmImport":
             self._index_realm_imports(manifests)
-            return ConvertResult()
+            return ProviderResult()
         return self._process_keycloak(manifests, ctx)
 
     def _index_realm_imports(self, manifests):
@@ -494,7 +494,7 @@ class KeycloakProvider(Provider):
             print(f"  keycloak: generated service '{name}'",
                   file=sys.stderr)
 
-        return ConvertResult(services=services)
+        return ProviderResult(services=services)
 
     def _write_realm_files(self, kc_name, realm_imports, ctx):
         """Write realm JSON files for auto-import on startup."""
