@@ -16,7 +16,7 @@ import secrets
 import string
 import sys
 
-from h2c import ProviderResult, Provider, apply_replacements
+from h2c import ProviderResult, Provider, apply_replacements  # pylint: disable=import-error  # h2c resolves at runtime
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -389,7 +389,7 @@ def _build_service_ports(env, tls_enabled):
 
 # ---- converter class -------------------------------------------------------
 
-class KeycloakProvider(Provider):
+class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # contract: one class, one method
     """Convert Keycloak and KeycloakRealmImport CRDs to compose services.
 
     KeycloakRealmImport is indexed first (kinds list order = call order),
@@ -404,6 +404,7 @@ class KeycloakProvider(Provider):
         self._realm_imports = {}   # keycloakCRName → [manifest]
 
     def convert(self, kind, manifests, ctx):
+        """Dispatch to realm import indexer or Keycloak processor."""
         if kind == "KeycloakRealmImport":
             self._index_realm_imports(manifests)
             return ProviderResult()

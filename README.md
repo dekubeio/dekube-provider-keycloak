@@ -57,6 +57,21 @@ Manual (pass the extension directory directly):
 python3 helmfile2compose.py --extensions-dir ./h2c-provider-keycloak --helmfile-dir ~/my-platform -e local --output-dir .
 ```
 
+## Code quality
+
+*Last updated: 2026-02-23*
+
+| Metric | Value |
+|--------|-------|
+| Pylint | 9.97/10 |
+| Pyflakes | clean |
+| Radon MI | 32.23 (A) |
+| Radon avg CC | 4.6 (A) |
+
+Worst CC: `_build_pod_template_volumes` (12, C), `_build_options_env` (11, C).
+
+The `E0401: Unable to import 'h2c'` is expected — extensions import from h2c-core at runtime, not at lint time.
+
 ## License
 
 Public domain.
