@@ -16,7 +16,7 @@ import secrets
 import string
 import sys
 
-from h2c import ProviderResult, Provider, apply_replacements  # pylint: disable=import-error  # h2c resolves at runtime
+from dekube import ProviderResult, Provider, apply_replacements  # pylint: disable=import-error  # h2c resolves at runtime
 
 
 # ---- helpers ---------------------------------------------------------------

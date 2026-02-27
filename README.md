@@ -1,4 +1,4 @@
-# h2c-provider-keycloak
+# dekube-provider-keycloak
 
 ![vibe coded](https://img.shields.io/badge/vibe-coded-ff69b4)
 ![python 3](https://img.shields.io/badge/python-3-3776AB)
@@ -6,7 +6,7 @@
 ![stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![public domain](https://img.shields.io/badge/license-public%20domain-brightgreen)
 
-Keycloak CRD converter for [helmfile2compose](https://github.com/helmfile2compose/helmfile2compose).
+Keycloak CRD converter for [dekube](https://dekube.io).
 
 ## Handled kinds
 
@@ -41,20 +41,20 @@ Replaces the Keycloak Operator's reconciliation logic with a direct compose serv
 
 ## Dependencies
 
-None. Uses stdlib only (`base64`, `json`, `os`, `secrets`, `string`, `sys`). Imports `ConvertResult` and `_apply_replacements` from `helmfile2compose`.
+None. Uses stdlib only (`base64`, `json`, `os`, `secrets`, `string`, `sys`). Imports `ConvertResult` and `_apply_replacements` from `dekube`.
 
 ## Usage
 
-Via h2c-manager (recommended):
+Via dekube-manager (recommended):
 
 ```bash
-python3 h2c-manager.py keycloak
+python3 dekube-manager.py keycloak
 ```
 
 Manual (pass the extension directory directly):
 
 ```bash
-python3 helmfile2compose.py --extensions-dir ./h2c-provider-keycloak --helmfile-dir ~/my-platform -e local --output-dir .
+python3 helmfile2compose.py --extensions-dir ./dekube-provider-keycloak --helmfile-dir ~/my-platform -e local --output-dir .
 ```
 
 ## Code quality
@@ -70,7 +70,7 @@ python3 helmfile2compose.py --extensions-dir ./h2c-provider-keycloak --helmfile-
 
 Worst CC: `_build_pod_template_volumes` (12, C), `_build_options_env` (11, C).
 
-The `E0401: Unable to import 'h2c'` is expected — extensions import from h2c-core at runtime, not at lint time.
+The `E0401: Unable to import 'dekube'` is expected — extensions import from dekube-engine at runtime, not at lint time.
 
 ## License
 
