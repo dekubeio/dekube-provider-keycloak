@@ -24,10 +24,10 @@ from dekube import ProviderResult, Provider, apply_replacements  # pylint: disab
 def _secret_val(ctx, name, key):
     """Resolve a single key from a K8s Secret in ctx.secrets."""
     sec = ctx.secrets.get(name, {})
-    val = sec.get("stringData", {}).get(key)
+    val = (sec.get("stringData") or {}).get(key)
     if val is not None:
         return val
-    raw = sec.get("data", {}).get(key)
+    raw = (sec.get("data") or {}).get(key)
     if raw is not None:
         try:
             return base64.b64decode(raw).decode("utf-8")
@@ -57,9 +57,9 @@ def _write_data_files(name, category, data, output_dir, generated):
 def _decode_secret_data(sec):
     """Merge stringData and base64-decoded data from a K8s Secret."""
     result = {}
-    for k, v in sec.get("stringData", {}).items():
+    for k, v in (sec.get("stringData") or {}).items():
         result[k] = v
-    for k, v in sec.get("data", {}).items():
+    for k, v in (sec.get("data") or {}).items():
         if k not in result:
             try:
                 result[k] = base64.b64decode(v).decode("utf-8")
@@ -88,8 +88,8 @@ def _build_volume_source_map(volumes):
 
 def _build_pod_template_volumes(spec, ctx):
     """Process volume mounts from unsupported.podTemplate.spec."""
-    pod_spec = (spec.get("unsupported", {})
-                .get("podTemplate", {}).get("spec", {}))
+    pod_spec = ((spec.get("unsupported") or {})
+                .get("podTemplate") or {}).get("spec") or {}
 
     volumes = pod_spec.get("volumes", [])
     if not volumes:
@@ -263,7 +263,7 @@ def _build_db_env(db, ctx):
 def _build_http_env(spec):
     """Map spec.http, httpManagement, hostname, proxy → KC_* env vars."""
     env = {}
-    http = spec.get("http", {})
+    http = spec.get("http") or {}
     if "httpEnabled" in http:
         env["KC_HTTP_ENABLED"] = str(http["httpEnabled"]).lower()
     if http.get("httpPort"):
@@ -272,10 +272,10 @@ def _build_http_env(spec):
         env["KC_HTTPS_PORT"] = str(http["httpsPort"])
     # The K8s Keycloak Operator always enables the management interface
     # (default port 9000). The CR may override it via httpManagement.port.
-    mgmt_port = spec.get("httpManagement", {}).get("port", 9000)
+    mgmt_port = (spec.get("httpManagement") or {}).get("port", 9000)
     env["KC_HTTP_MANAGEMENT_PORT"] = str(mgmt_port)
 
-    hostname = spec.get("hostname", {})
+    hostname = spec.get("hostname") or {}
     if hostname.get("hostname"):
         env["KC_HOSTNAME"] = hostname["hostname"]
     if hostname.get("admin"):
@@ -286,7 +286,7 @@ def _build_http_env(spec):
     if "strict" in hostname:
         env["KC_HOSTNAME_STRICT"] = str(hostname["strict"]).lower()
 
-    proxy = spec.get("proxy", {})
+    proxy = spec.get("proxy") or {}
     if proxy.get("headers"):
         env["KC_PROXY_HEADERS"] = proxy["headers"]
     return env
@@ -295,7 +295,7 @@ def _build_http_env(spec):
 def _build_options_env(spec, ctx, kc_name="keycloak"):
     """Map features, additionalOptions, podTemplate env, bootstrap admin."""
     env = {}
-    features = spec.get("features", {})
+    features = spec.get("features") or {}
     enabled = features.get("enabled")
     if enabled:
         env["KC_FEATURES"] = ",".join(enabled)
@@ -312,9 +312,9 @@ def _build_options_env(spec, ctx, kc_name="keycloak"):
             if val:
                 env[env_name] = val
 
-    pod_spec = (spec.get("unsupported", {})
-                .get("podTemplate", {}).get("spec", {}))
-    for container in pod_spec.get("containers", []):
+    pod_spec = ((spec.get("unsupported") or {})
+                .get("podTemplate") or {}).get("spec") or {}
+    for container in pod_spec.get("containers") or []:
         if container.get("name") == "keycloak":
             for e in container.get("env", []):
                 if "value" in e:
@@ -326,8 +326,8 @@ def _build_options_env(spec, ctx, kc_name="keycloak"):
 
 def _resolve_bootstrap_admin(spec, ctx, kc_name):
     """Resolve bootstrap admin credentials from CRD or generate them."""
-    admin_secret = (spec.get("bootstrapAdmin", {})
-                    .get("user", {}).get("secret"))
+    admin_secret = ((spec.get("bootstrapAdmin") or {})
+                    .get("user") or {}).get("secret")
     if admin_secret:
         env = {}
         for field, env_key in [("username", "KC_BOOTSTRAP_ADMIN_USERNAME"),
@@ -429,7 +429,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             }
 
             # TLS secret for HTTPS listener
-            tls_secret = spec.get("http", {}).get("tlsSecret")
+            tls_secret = (spec.get("http") or {}).get("tlsSecret")
             if tls_secret and tls_secret in ctx.generated_secrets:
                 vols = service.setdefault("volumes", [])
                 vols.append(f"./secrets/{tls_secret}/tls.crt"
