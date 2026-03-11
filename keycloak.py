@@ -140,7 +140,7 @@ def _mount_configmap(cm_name, ctx):
         ctx.warnings.append(
             f"Keycloak podTemplate: ConfigMap '{cm_name}' not found")
         return None
-    return _write_data_files(cm_name, "configmaps", cm.get("data", {}),
+    return _write_data_files(cm_name, "configmaps", cm.get("data") or {},
                              ctx.output_dir, ctx.generated_cms)
 
 
@@ -303,7 +303,7 @@ def _build_options_env(spec, ctx, kc_name="keycloak"):
     if disabled:
         env["KC_FEATURES_DISABLED"] = ",".join(disabled)
 
-    for opt in spec.get("additionalOptions", []):
+    for opt in spec.get("additionalOptions") or []:
         env_name = "KC_" + opt["name"].upper().replace("-", "_")
         if "value" in opt:
             env[env_name] = opt["value"]
@@ -316,7 +316,7 @@ def _build_options_env(spec, ctx, kc_name="keycloak"):
                 .get("podTemplate") or {}).get("spec") or {}
     for container in pod_spec.get("containers") or []:
         if container.get("name") == "keycloak":
-            for e in container.get("env", []):
+            for e in container.get("env") or []:
                 if "value" in e:
                     env[e["name"]] = e["value"]
 
@@ -349,7 +349,7 @@ def _resolve_bootstrap_admin(spec, ctx, kc_name):
 def _build_env(spec, ctx, kc_name="keycloak"):
     """Map a Keycloak CR spec to KC_* environment variables."""
     env = {}
-    env.update(_build_db_env(spec.get("db", {}), ctx))
+    env.update(_build_db_env(spec.get("db") or {}, ctx))
     env.update(_build_http_env(spec))
     env["KC_CACHE"] = "local"  # compose = single instance, no clustering
     # The K8s Keycloak Operator enables these implicitly; Keycloak needs
@@ -412,14 +412,14 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
 
     def _index_realm_imports(self, manifests):
         for m in manifests:
-            cr_name = m.get("spec", {}).get("keycloakCRName", "")
+            cr_name = (m.get("spec") or {}).get("keycloakCRName", "")
             self._realm_imports.setdefault(cr_name, []).append(m)
 
     def _process_keycloak(self, manifests, ctx):
         services = {}
         for m in manifests:
-            name = m.get("metadata", {}).get("name", "?")
-            spec = m.get("spec", {})
+            name = (m.get("metadata") or {}).get("name", "?")
+            spec = m.get("spec") or {}
 
             env = _build_env(spec, ctx, name)
             service = {
@@ -467,7 +467,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             # In K8s the Keycloak Operator creates the Service at runtime;
             # here we replicate what it would look like.
             svc_ports = _build_service_ports(env, bool(tls_secret))
-            ns = m.get("metadata", {}).get("namespace", "")
+            ns = (m.get("metadata") or {}).get("namespace", "")
             ctx.services_by_selector[name] = {
                 "name": name,
                 "namespace": ns,
@@ -504,8 +504,8 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
         os.makedirs(abs_dir, exist_ok=True)
 
         for m in realm_imports:
-            spec = m.get("spec", {})
-            realm = spec.get("realm", {})
+            spec = m.get("spec") or {}
+            realm = spec.get("realm") or {}
             realm_name = realm.get("realm", "unknown")
 
             # Skip master realm: let Keycloak create it with defaults.
@@ -519,7 +519,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
                 continue
 
             # Resolve ${PLACEHOLDER} from secrets
-            placeholders = spec.get("placeholders", {})
+            placeholders = spec.get("placeholders") or {}
             if placeholders:
                 realm = _resolve_placeholders(realm, placeholders, ctx)
 
