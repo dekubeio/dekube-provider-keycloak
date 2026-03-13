@@ -48,8 +48,12 @@ def _write_data_files(name, category, data, output_dir, generated):
         generated.add(name)
         abs_dir = os.path.join(output_dir, rel_dir)
         os.makedirs(abs_dir, exist_ok=True)
+        out_real = os.path.realpath(output_dir) + os.sep
         for key, value in data.items():
-            with open(os.path.join(abs_dir, key), "w", encoding="utf-8") as f:
+            file_path = os.path.join(abs_dir, key)
+            if not os.path.realpath(file_path).startswith(out_real):
+                continue
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.write(str(value))
     return rel_dir
 
@@ -176,7 +180,8 @@ def _generate_password(length=24):
 
 def _ensure_initial_admin(kc_name, output_dir, generated_secrets):
     """Generate or reuse initial-admin credentials, written as a K8s-style Secret."""
-    secret_name = f"{kc_name}-initial-admin"
+    safe_name = os.path.basename(kc_name)
+    secret_name = f"{safe_name}-initial-admin"
     secret_dir = os.path.join(output_dir, "secrets", secret_name)
 
     username_file = os.path.join(secret_dir, "username")
@@ -499,14 +504,16 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
 
     def _write_realm_files(self, kc_name, realm_imports, ctx):
         """Write realm JSON files for auto-import on startup."""
-        realm_dir = os.path.join("configmaps", f"{kc_name}-realms")
+        safe_name = os.path.basename(kc_name)
+        realm_dir = os.path.join("configmaps", f"{safe_name}-realms")
         abs_dir = os.path.join(ctx.output_dir, realm_dir)
         os.makedirs(abs_dir, exist_ok=True)
+        out_real = os.path.realpath(ctx.output_dir) + os.sep
 
         for m in realm_imports:
             spec = m.get("spec") or {}
             realm = spec.get("realm") or {}
-            realm_name = realm.get("realm", "unknown")
+            realm_name = os.path.basename(realm.get("realm", "unknown"))
 
             # Skip master realm: let Keycloak create it with defaults.
             # In K8s the operator imports realms AFTER startup (separate
@@ -527,6 +534,8 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             realm = _rewrite_realm_urls(realm, ctx.replacements)
 
             filepath = os.path.join(abs_dir, f"{realm_name}-realm.json")
+            if not os.path.realpath(filepath).startswith(out_real):
+                continue
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(realm, f, indent=2, ensure_ascii=False)
 
