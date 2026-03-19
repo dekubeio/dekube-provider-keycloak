@@ -19,379 +19,6 @@ import sys
 from dekube import ProviderResult, Provider, apply_replacements  # pylint: disable=import-error  # h2c resolves at runtime
 
 
-# ---- helpers ---------------------------------------------------------------
-
-def _secret_val(ctx, name, key):
-    """Resolve a single key from a K8s Secret in ctx.secrets."""
-    sec = ctx.secrets.get(name, {})
-    val = (sec.get("stringData") or {}).get(key)
-    if val is not None:
-        return val
-    raw = (sec.get("data") or {}).get(key)
-    if raw is not None:
-        try:
-            return base64.b64decode(raw).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return raw
-    return None
-
-
-def _secret_ref(ref, ctx):
-    """Resolve a Keycloak-style secret ref: {name: ..., key: ...}."""
-    return _secret_val(ctx, ref.get("name", ""), ref.get("key", ""))
-
-
-def _write_data_files(name, category, data, output_dir, generated):
-    """Write data entries as files under category/name/. Returns relative dir."""
-    rel_dir = os.path.join(category, name)
-    if name not in generated:
-        generated.add(name)
-        abs_dir = os.path.join(output_dir, rel_dir)
-        os.makedirs(abs_dir, exist_ok=True)
-        out_real = os.path.realpath(output_dir) + os.sep
-        for key, value in data.items():
-            file_path = os.path.join(abs_dir, key)
-            if not os.path.realpath(file_path).startswith(out_real):
-                continue
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(str(value))
-    return rel_dir
-
-
-def _decode_secret_data(sec):
-    """Merge stringData and base64-decoded data from a K8s Secret."""
-    result = {}
-    for k, v in (sec.get("stringData") or {}).items():
-        result[k] = v
-    for k, v in (sec.get("data") or {}).items():
-        if k not in result:
-            try:
-                result[k] = base64.b64decode(v).decode("utf-8")
-            except (ValueError, UnicodeDecodeError):
-                result[k] = v
-    return result
-
-
-def _build_volume_source_map(volumes):
-    """Map volume names to their source type (configmap or secret)."""
-    vol_map = {}
-    for v in volumes:
-        vname = v.get("name", "")
-        if "configMap" in v:
-            vol_map[vname] = {
-                "type": "configmap",
-                "name": v["configMap"].get("name", ""),
-            }
-        elif "secret" in v:
-            vol_map[vname] = {
-                "type": "secret",
-                "name": v["secret"].get("secretName", ""),
-            }
-    return vol_map
-
-
-def _build_pod_template_volumes(spec, ctx):
-    """Process volume mounts from unsupported.podTemplate.spec."""
-    pod_spec = ((spec.get("unsupported") or {})
-                .get("podTemplate") or {}).get("spec") or {}
-
-    volumes = pod_spec.get("volumes", [])
-    if not volumes:
-        return []
-
-    # Find keycloak container's volumeMounts
-    mounts = []
-    for container in pod_spec.get("containers", []):
-        if container.get("name") == "keycloak":
-            mounts = container.get("volumeMounts", [])
-            break
-    if not mounts:
-        return []
-
-    vol_map = _build_volume_source_map(volumes)
-
-    result = []
-    for vm in mounts:
-        source = vol_map.get(vm.get("name", ""))
-        if source is None:
-            continue
-
-        mount_path = vm.get("mountPath", "")
-        sub_path = vm.get("subPath")
-        ro = ":ro" if vm.get("readOnly", False) else ""
-
-        if source["type"] == "configmap":
-            rel_dir = _mount_configmap(source["name"], ctx)
-        elif source["type"] == "secret":
-            rel_dir = _mount_secret(source["name"], ctx)
-        else:
-            continue
-
-        if rel_dir is None:
-            continue
-        if sub_path:
-            result.append(f"./{rel_dir}/{sub_path}:{mount_path}{ro}")
-        else:
-            result.append(f"./{rel_dir}:{mount_path}{ro}")
-
-    return result
-
-
-def _mount_configmap(cm_name, ctx):
-    """Generate configmap files, return relative dir or None."""
-    cm = ctx.configmaps.get(cm_name)
-    if cm is None:
-        ctx.warnings.append(
-            f"Keycloak podTemplate: ConfigMap '{cm_name}' not found")
-        return None
-    return _write_data_files(cm_name, "configmaps", cm.get("data") or {},
-                             ctx.output_dir, ctx.generated_cms)
-
-
-def _mount_secret(sec_name, ctx):
-    """Generate secret files, return relative dir or None."""
-    sec = ctx.secrets.get(sec_name)
-    if sec is None:
-        ctx.warnings.append(
-            f"Keycloak podTemplate: Secret '{sec_name}' not found")
-        return None
-    return _write_data_files(sec_name, "secrets", _decode_secret_data(sec),
-                             ctx.output_dir, ctx.generated_secrets)
-
-
-def _rewrite_realm_urls(obj, replacements):
-    """Apply replacements in all string values."""
-    if isinstance(obj, str):
-        if replacements:
-            return apply_replacements(obj, replacements)
-        return obj
-    if isinstance(obj, dict):
-        return {k: _rewrite_realm_urls(v, replacements) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_rewrite_realm_urls(item, replacements) for item in obj]
-    return obj
-
-
-def _generate_password(length=24):
-    """Generate a random password (alphanumeric, no shell-hostile chars)."""
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def _ensure_initial_admin(kc_name, output_dir, generated_secrets):
-    """Generate or reuse initial-admin credentials, written as a K8s-style Secret."""
-    safe_name = os.path.basename(kc_name)
-    secret_name = f"{safe_name}-initial-admin"
-    secret_dir = os.path.join(output_dir, "secrets", secret_name)
-
-    username_file = os.path.join(secret_dir, "username")
-    password_file = os.path.join(secret_dir, "password")
-
-    # Reuse existing credentials (idempotent across runs)
-    if os.path.isfile(username_file) and os.path.isfile(password_file):
-        with open(username_file, encoding="utf-8") as f:
-            username = f.read().strip()
-        with open(password_file, encoding="utf-8") as f:
-            password = f.read().strip()
-        print(f"  keycloak: reusing admin credentials from secrets/{secret_name}/",
-              file=sys.stderr)
-    else:
-        username = "temp-admin"
-        password = _generate_password()
-        os.makedirs(secret_dir, exist_ok=True)
-        with open(username_file, "w", encoding="utf-8") as f:
-            f.write(username)
-        with open(password_file, "w", encoding="utf-8") as f:
-            f.write(password)
-        print(f"  keycloak: generated admin credentials → secrets/{secret_name}/",
-              file=sys.stderr)
-
-    generated_secrets.add(secret_name)
-    return {"username": username, "password": password}
-
-
-def _resolve_placeholders(realm, placeholders, ctx):
-    """Replace ${PLACEHOLDER} in realm dict values with secret data."""
-    resolved = {}
-    for ph_name, ph_spec in placeholders.items():
-        secret = ph_spec.get("secret")
-        if secret:
-            val = _secret_ref(secret, ctx)
-            if val:
-                resolved[ph_name] = val
-
-    if not resolved:
-        return realm
-
-    def _walk(obj):
-        if isinstance(obj, str):
-            for ph, val in resolved.items():
-                obj = obj.replace(f"${{{ph}}}", val)
-            return obj
-        if isinstance(obj, dict):
-            return {k: _walk(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_walk(item) for item in obj]
-        return obj
-
-    return _walk(realm)
-
-
-# ---- env var mapping -------------------------------------------------------
-
-def _build_db_env(db, ctx):
-    """Map spec.db → KC_DB_* env vars."""
-    env = {}
-    if db.get("vendor"):
-        env["KC_DB"] = db["vendor"]
-    if db.get("url"):
-        env["KC_DB_URL"] = db["url"]
-    else:
-        if db.get("host"):
-            env["KC_DB_URL_HOST"] = db["host"]
-        if db.get("port"):
-            env["KC_DB_URL_PORT"] = str(db["port"])
-        if db.get("database"):
-            env["KC_DB_URL_DATABASE"] = db["database"]
-    if db.get("schema"):
-        env["KC_DB_SCHEMA"] = db["schema"]
-    for field, env_key in [("usernameSecret", "KC_DB_USERNAME"),
-                           ("passwordSecret", "KC_DB_PASSWORD")]:
-        ref = db.get(field)
-        if ref:
-            val = _secret_ref(ref, ctx)
-            if val:
-                env[env_key] = val
-    return env
-
-
-def _build_http_env(spec):
-    """Map spec.http, httpManagement, hostname, proxy → KC_* env vars."""
-    env = {}
-    http = spec.get("http") or {}
-    if "httpEnabled" in http:
-        env["KC_HTTP_ENABLED"] = str(http["httpEnabled"]).lower()
-    if http.get("httpPort"):
-        env["KC_HTTP_PORT"] = str(http["httpPort"])
-    if http.get("httpsPort"):
-        env["KC_HTTPS_PORT"] = str(http["httpsPort"])
-    # The K8s Keycloak Operator always enables the management interface
-    # (default port 9000). The CR may override it via httpManagement.port.
-    mgmt_port = (spec.get("httpManagement") or {}).get("port", 9000)
-    env["KC_HTTP_MANAGEMENT_PORT"] = str(mgmt_port)
-
-    hostname = spec.get("hostname") or {}
-    if hostname.get("hostname"):
-        env["KC_HOSTNAME"] = hostname["hostname"]
-    if hostname.get("admin"):
-        env["KC_HOSTNAME_ADMIN"] = hostname["admin"]
-    if "backchannelDynamic" in hostname:
-        env["KC_HOSTNAME_BACKCHANNEL_DYNAMIC"] = str(
-            hostname["backchannelDynamic"]).lower()
-    if "strict" in hostname:
-        env["KC_HOSTNAME_STRICT"] = str(hostname["strict"]).lower()
-
-    proxy = spec.get("proxy") or {}
-    if proxy.get("headers"):
-        env["KC_PROXY_HEADERS"] = proxy["headers"]
-    return env
-
-
-def _build_options_env(spec, ctx, kc_name="keycloak"):
-    """Map features, additionalOptions, podTemplate env, bootstrap admin."""
-    env = {}
-    features = spec.get("features") or {}
-    enabled = features.get("enabled")
-    if enabled:
-        env["KC_FEATURES"] = ",".join(enabled)
-    disabled = features.get("disabled")
-    if disabled:
-        env["KC_FEATURES_DISABLED"] = ",".join(disabled)
-
-    for opt in spec.get("additionalOptions") or []:
-        env_name = "KC_" + opt["name"].upper().replace("-", "_")
-        if "value" in opt:
-            env[env_name] = opt["value"]
-        elif "secret" in opt:
-            val = _secret_ref(opt["secret"], ctx)
-            if val:
-                env[env_name] = val
-
-    pod_spec = ((spec.get("unsupported") or {})
-                .get("podTemplate") or {}).get("spec") or {}
-    for container in pod_spec.get("containers") or []:
-        if container.get("name") == "keycloak":
-            for e in container.get("env") or []:
-                if "value" in e:
-                    env[e["name"]] = e["value"]
-
-    env.update(_resolve_bootstrap_admin(spec, ctx, kc_name))
-    return env
-
-
-def _resolve_bootstrap_admin(spec, ctx, kc_name):
-    """Resolve bootstrap admin credentials from CRD or generate them."""
-    admin_secret = ((spec.get("bootstrapAdmin") or {})
-                    .get("user") or {}).get("secret")
-    if admin_secret:
-        env = {}
-        for field, env_key in [("username", "KC_BOOTSTRAP_ADMIN_USERNAME"),
-                               ("password", "KC_BOOTSTRAP_ADMIN_PASSWORD")]:
-            val = _secret_val(ctx, admin_secret, field)
-            if val:
-                env[env_key] = val
-        return env
-    # No bootstrapAdmin in CRD — K8s operator creates it dynamically.
-    # Replicate: generate credentials, write to secrets/ like a K8s Secret.
-    creds = _ensure_initial_admin(
-        kc_name, ctx.output_dir, ctx.generated_secrets)
-    return {
-        "KC_BOOTSTRAP_ADMIN_USERNAME": creds["username"],
-        "KC_BOOTSTRAP_ADMIN_PASSWORD": creds["password"],
-    }
-
-
-def _build_env(spec, ctx, kc_name="keycloak"):
-    """Map a Keycloak CR spec to KC_* environment variables."""
-    env = {}
-    env.update(_build_db_env(spec.get("db") or {}, ctx))
-    env.update(_build_http_env(spec))
-    env["KC_CACHE"] = "local"  # compose = single instance, no clustering
-    # The K8s Keycloak Operator enables these implicitly; Keycloak needs
-    # them to activate the management interface (separate port for metrics).
-    env.setdefault("KC_HEALTH_ENABLED", "true")
-    env.setdefault("KC_METRICS_ENABLED", "true")
-    env.update(_build_options_env(spec, ctx, kc_name))
-    return env
-
-
-def _build_service_ports(env, tls_enabled):
-    """Build K8s-style Service port list from Keycloak env vars."""
-    svc_ports = []
-    if tls_enabled:
-        https_port = int(env.get("KC_HTTPS_PORT", 8443))
-        svc_ports.append({"name": "https", "port": https_port,
-                          "targetPort": https_port})
-    http_enabled = env.get("KC_HTTP_ENABLED", "false") == "true"
-    if http_enabled or not tls_enabled:
-        http_port = int(env.get("KC_HTTP_PORT", 8080))
-        svc_ports.append({"name": "http", "port": http_port,
-                          "targetPort": http_port})
-    if "KC_HTTP_MANAGEMENT_PORT" in env:
-        mgmt_port = int(env["KC_HTTP_MANAGEMENT_PORT"])
-        svc_ports.append({"name": "management", "port": mgmt_port,
-                          "targetPort": mgmt_port})
-    else:
-        # No dedicated management port — metrics served on main listener.
-        # Map "management" to the main port so ServiceMonitors referencing
-        # port "management" resolve.
-        main_port = (int(env.get("KC_HTTPS_PORT", 8443)) if tls_enabled
-                     else int(env.get("KC_HTTP_PORT", 8080)))
-        svc_ports.append({"name": "management", "port": main_port,
-                          "targetPort": main_port})
-    return svc_ports
-
-
 # ---- converter class -------------------------------------------------------
 
 class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # contract: one class, one method
@@ -426,7 +53,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             name = (m.get("metadata") or {}).get("name", "?")
             spec = m.get("spec") or {}
 
-            env = _build_env(spec, ctx, name)
+            env = self._build_env(spec, ctx, name)
             service = {
                 "restart": "always",
                 "image": spec.get("image", "quay.io/keycloak/keycloak:latest"),
@@ -447,7 +74,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
                     "/opt/keycloak/conf/server.key.pem"
 
             # Volumes from podTemplate (e.g. CA trust bundle)
-            pod_vols = _build_pod_template_volumes(spec, ctx)
+            pod_vols = self._build_pod_template_volumes(spec, ctx)
             if pod_vols:
                 service.setdefault("volumes", []).extend(pod_vols)
 
@@ -471,7 +98,7 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             # servicemonitor) can discover this service by label matching.
             # In K8s the Keycloak Operator creates the Service at runtime;
             # here we replicate what it would look like.
-            svc_ports = _build_service_ports(env, bool(tls_secret))
+            svc_ports = self._build_service_ports(env, bool(tls_secret))
             ns = (m.get("metadata") or {}).get("namespace", "")
             ctx.services_by_selector[name] = {
                 "name": name,
@@ -528,10 +155,10 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
             # Resolve ${PLACEHOLDER} from secrets
             placeholders = spec.get("placeholders") or {}
             if placeholders:
-                realm = _resolve_placeholders(realm, placeholders, ctx)
+                realm = self._resolve_placeholders(realm, placeholders, ctx)
 
             # Rewrite K8s DNS and apply replacements
-            realm = _rewrite_realm_urls(realm, ctx.replacements)
+            realm = self._rewrite_realm_urls(realm, ctx.replacements)
 
             filepath = os.path.join(abs_dir, f"{realm_name}-realm.json")
             if not os.path.realpath(filepath).startswith(out_real):
@@ -543,3 +170,378 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
                   file=sys.stderr)
 
         return realm_dir
+
+    # ---- helpers ---------------------------------------------------------------
+
+    @staticmethod
+    def _secret_val(ctx, name, key):
+        """Resolve a single key from a K8s Secret in ctx.secrets."""
+        sec = ctx.secrets.get(name, {})
+        val = (sec.get("stringData") or {}).get(key)
+        if val is not None:
+            return val
+        raw = (sec.get("data") or {}).get(key)
+        if raw is not None:
+            try:
+                return base64.b64decode(raw).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return raw
+        return None
+
+    @staticmethod
+    def _secret_ref(ref, ctx):
+        """Resolve a Keycloak-style secret ref: {name: ..., key: ...}."""
+        return KeycloakProvider._secret_val(ctx, ref.get("name", ""), ref.get("key", ""))
+
+    @staticmethod
+    def _write_data_files(name, category, data, output_dir, generated):
+        """Write data entries as files under category/name/. Returns relative dir."""
+        rel_dir = os.path.join(category, name)
+        if name not in generated:
+            generated.add(name)
+            abs_dir = os.path.join(output_dir, rel_dir)
+            os.makedirs(abs_dir, exist_ok=True)
+            out_real = os.path.realpath(output_dir) + os.sep
+            for key, value in data.items():
+                file_path = os.path.join(abs_dir, key)
+                if not os.path.realpath(file_path).startswith(out_real):
+                    continue
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(str(value))
+        return rel_dir
+
+    @staticmethod
+    def _decode_secret_data(sec):
+        """Merge stringData and base64-decoded data from a K8s Secret."""
+        result = {}
+        for k, v in (sec.get("stringData") or {}).items():
+            result[k] = v
+        for k, v in (sec.get("data") or {}).items():
+            if k not in result:
+                try:
+                    result[k] = base64.b64decode(v).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    result[k] = v
+        return result
+
+    @staticmethod
+    def _build_volume_source_map(volumes):
+        """Map volume names to their source type (configmap or secret)."""
+        vol_map = {}
+        for v in volumes:
+            vname = v.get("name", "")
+            if "configMap" in v:
+                vol_map[vname] = {
+                    "type": "configmap",
+                    "name": v["configMap"].get("name", ""),
+                }
+            elif "secret" in v:
+                vol_map[vname] = {
+                    "type": "secret",
+                    "name": v["secret"].get("secretName", ""),
+                }
+        return vol_map
+
+    @staticmethod
+    def _build_pod_template_volumes(spec, ctx):
+        """Process volume mounts from unsupported.podTemplate.spec."""
+        pod_spec = ((spec.get("unsupported") or {})
+                    .get("podTemplate") or {}).get("spec") or {}
+
+        volumes = pod_spec.get("volumes", [])
+        if not volumes:
+            return []
+
+        # Find keycloak container's volumeMounts
+        mounts = []
+        for container in pod_spec.get("containers", []):
+            if container.get("name") == "keycloak":
+                mounts = container.get("volumeMounts", [])
+                break
+        if not mounts:
+            return []
+
+        vol_map = KeycloakProvider._build_volume_source_map(volumes)
+
+        result = []
+        for vm in mounts:
+            source = vol_map.get(vm.get("name", ""))
+            if source is None:
+                continue
+
+            mount_path = vm.get("mountPath", "")
+            sub_path = vm.get("subPath")
+            ro = ":ro" if vm.get("readOnly", False) else ""
+
+            if source["type"] == "configmap":
+                rel_dir = KeycloakProvider._mount_configmap(source["name"], ctx)
+            elif source["type"] == "secret":
+                rel_dir = KeycloakProvider._mount_secret(source["name"], ctx)
+            else:
+                continue
+
+            if rel_dir is None:
+                continue
+            if sub_path:
+                result.append(f"./{rel_dir}/{sub_path}:{mount_path}{ro}")
+            else:
+                result.append(f"./{rel_dir}:{mount_path}{ro}")
+
+        return result
+
+    @staticmethod
+    def _mount_configmap(cm_name, ctx):
+        """Generate configmap files, return relative dir or None."""
+        cm = ctx.configmaps.get(cm_name)
+        if cm is None:
+            ctx.warnings.append(
+                f"Keycloak podTemplate: ConfigMap '{cm_name}' not found")
+            return None
+        return KeycloakProvider._write_data_files(
+            cm_name, "configmaps", cm.get("data") or {},
+            ctx.output_dir, ctx.generated_cms)
+
+    @staticmethod
+    def _mount_secret(sec_name, ctx):
+        """Generate secret files, return relative dir or None."""
+        sec = ctx.secrets.get(sec_name)
+        if sec is None:
+            ctx.warnings.append(
+                f"Keycloak podTemplate: Secret '{sec_name}' not found")
+            return None
+        return KeycloakProvider._write_data_files(
+            sec_name, "secrets", KeycloakProvider._decode_secret_data(sec),
+            ctx.output_dir, ctx.generated_secrets)
+
+    @staticmethod
+    def _rewrite_realm_urls(obj, replacements):
+        """Apply replacements in all string values."""
+        if isinstance(obj, str):
+            if replacements:
+                return apply_replacements(obj, replacements)
+            return obj
+        if isinstance(obj, dict):
+            return {k: KeycloakProvider._rewrite_realm_urls(v, replacements) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [KeycloakProvider._rewrite_realm_urls(item, replacements) for item in obj]
+        return obj
+
+    @staticmethod
+    def _generate_password(length=24):
+        """Generate a random password (alphanumeric, no shell-hostile chars)."""
+        alphabet = string.ascii_letters + string.digits
+        return "".join(secrets.choice(alphabet) for _ in range(length))
+
+    @staticmethod
+    def _ensure_initial_admin(kc_name, output_dir, generated_secrets):
+        """Generate or reuse initial-admin credentials, written as a K8s-style Secret."""
+        safe_name = os.path.basename(kc_name)
+        secret_name = f"{safe_name}-initial-admin"
+        secret_dir = os.path.join(output_dir, "secrets", secret_name)
+
+        username_file = os.path.join(secret_dir, "username")
+        password_file = os.path.join(secret_dir, "password")
+
+        # Reuse existing credentials (idempotent across runs)
+        if os.path.isfile(username_file) and os.path.isfile(password_file):
+            with open(username_file, encoding="utf-8") as f:
+                username = f.read().strip()
+            with open(password_file, encoding="utf-8") as f:
+                password = f.read().strip()
+            print(f"  keycloak: reusing admin credentials from secrets/{secret_name}/",
+                  file=sys.stderr)
+        else:
+            username = "temp-admin"
+            password = KeycloakProvider._generate_password()
+            os.makedirs(secret_dir, exist_ok=True)
+            with open(username_file, "w", encoding="utf-8") as f:
+                f.write(username)
+            with open(password_file, "w", encoding="utf-8") as f:
+                f.write(password)
+            print(f"  keycloak: generated admin credentials → secrets/{secret_name}/",
+                  file=sys.stderr)
+
+        generated_secrets.add(secret_name)
+        return {"username": username, "password": password}
+
+    @staticmethod
+    def _resolve_placeholders(realm, placeholders, ctx):
+        """Replace ${PLACEHOLDER} in realm dict values with secret data."""
+        resolved = {}
+        for ph_name, ph_spec in placeholders.items():
+            secret = ph_spec.get("secret")
+            if secret:
+                val = KeycloakProvider._secret_ref(secret, ctx)
+                if val:
+                    resolved[ph_name] = val
+
+        if not resolved:
+            return realm
+
+        def _walk(obj):
+            if isinstance(obj, str):
+                for ph, val in resolved.items():
+                    obj = obj.replace(f"${{{ph}}}", val)
+                return obj
+            if isinstance(obj, dict):
+                return {k: _walk(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_walk(item) for item in obj]
+            return obj
+
+        return _walk(realm)
+
+    # ---- env var mapping -------------------------------------------------------
+
+    @staticmethod
+    def _build_db_env(db, ctx):
+        """Map spec.db → KC_DB_* env vars."""
+        env = {}
+        if db.get("vendor"):
+            env["KC_DB"] = db["vendor"]
+        if db.get("url"):
+            env["KC_DB_URL"] = db["url"]
+        else:
+            if db.get("host"):
+                env["KC_DB_URL_HOST"] = db["host"]
+            if db.get("port"):
+                env["KC_DB_URL_PORT"] = str(db["port"])
+            if db.get("database"):
+                env["KC_DB_URL_DATABASE"] = db["database"]
+        if db.get("schema"):
+            env["KC_DB_SCHEMA"] = db["schema"]
+        for field, env_key in [("usernameSecret", "KC_DB_USERNAME"),
+                               ("passwordSecret", "KC_DB_PASSWORD")]:
+            ref = db.get(field)
+            if ref:
+                val = KeycloakProvider._secret_ref(ref, ctx)
+                if val:
+                    env[env_key] = val
+        return env
+
+    @staticmethod
+    def _build_http_env(spec):
+        """Map spec.http, httpManagement, hostname, proxy → KC_* env vars."""
+        env = {}
+        http = spec.get("http") or {}
+        if "httpEnabled" in http:
+            env["KC_HTTP_ENABLED"] = str(http["httpEnabled"]).lower()
+        if http.get("httpPort"):
+            env["KC_HTTP_PORT"] = str(http["httpPort"])
+        if http.get("httpsPort"):
+            env["KC_HTTPS_PORT"] = str(http["httpsPort"])
+        # The K8s Keycloak Operator always enables the management interface
+        # (default port 9000). The CR may override it via httpManagement.port.
+        mgmt_port = (spec.get("httpManagement") or {}).get("port", 9000)
+        env["KC_HTTP_MANAGEMENT_PORT"] = str(mgmt_port)
+
+        hostname = spec.get("hostname") or {}
+        if hostname.get("hostname"):
+            env["KC_HOSTNAME"] = hostname["hostname"]
+        if hostname.get("admin"):
+            env["KC_HOSTNAME_ADMIN"] = hostname["admin"]
+        if "backchannelDynamic" in hostname:
+            env["KC_HOSTNAME_BACKCHANNEL_DYNAMIC"] = str(
+                hostname["backchannelDynamic"]).lower()
+        if "strict" in hostname:
+            env["KC_HOSTNAME_STRICT"] = str(hostname["strict"]).lower()
+
+        proxy = spec.get("proxy") or {}
+        if proxy.get("headers"):
+            env["KC_PROXY_HEADERS"] = proxy["headers"]
+        return env
+
+    @staticmethod
+    def _build_options_env(spec, ctx, kc_name="keycloak"):
+        """Map features, additionalOptions, podTemplate env, bootstrap admin."""
+        env = {}
+        features = spec.get("features") or {}
+        enabled = features.get("enabled")
+        if enabled:
+            env["KC_FEATURES"] = ",".join(enabled)
+        disabled = features.get("disabled")
+        if disabled:
+            env["KC_FEATURES_DISABLED"] = ",".join(disabled)
+
+        for opt in spec.get("additionalOptions") or []:
+            env_name = "KC_" + opt["name"].upper().replace("-", "_")
+            if "value" in opt:
+                env[env_name] = opt["value"]
+            elif "secret" in opt:
+                val = KeycloakProvider._secret_ref(opt["secret"], ctx)
+                if val:
+                    env[env_name] = val
+
+        pod_spec = ((spec.get("unsupported") or {})
+                    .get("podTemplate") or {}).get("spec") or {}
+        for container in pod_spec.get("containers") or []:
+            if container.get("name") == "keycloak":
+                for e in container.get("env") or []:
+                    if "value" in e:
+                        env[e["name"]] = e["value"]
+
+        env.update(KeycloakProvider._resolve_bootstrap_admin(spec, ctx, kc_name))
+        return env
+
+    @staticmethod
+    def _resolve_bootstrap_admin(spec, ctx, kc_name):
+        """Resolve bootstrap admin credentials from CRD or generate them."""
+        admin_secret = ((spec.get("bootstrapAdmin") or {})
+                        .get("user") or {}).get("secret")
+        if admin_secret:
+            env = {}
+            for field, env_key in [("username", "KC_BOOTSTRAP_ADMIN_USERNAME"),
+                                   ("password", "KC_BOOTSTRAP_ADMIN_PASSWORD")]:
+                val = KeycloakProvider._secret_val(ctx, admin_secret, field)
+                if val:
+                    env[env_key] = val
+            return env
+        # No bootstrapAdmin in CRD — K8s operator creates it dynamically.
+        # Replicate: generate credentials, write to secrets/ like a K8s Secret.
+        creds = KeycloakProvider._ensure_initial_admin(
+            kc_name, ctx.output_dir, ctx.generated_secrets)
+        return {
+            "KC_BOOTSTRAP_ADMIN_USERNAME": creds["username"],
+            "KC_BOOTSTRAP_ADMIN_PASSWORD": creds["password"],
+        }
+
+    @staticmethod
+    def _build_env(spec, ctx, kc_name="keycloak"):
+        """Map a Keycloak CR spec to KC_* environment variables."""
+        env = {}
+        env.update(KeycloakProvider._build_db_env(spec.get("db") or {}, ctx))
+        env.update(KeycloakProvider._build_http_env(spec))
+        env["KC_CACHE"] = "local"  # compose = single instance, no clustering
+        # The K8s Keycloak Operator enables these implicitly; Keycloak needs
+        # them to activate the management interface (separate port for metrics).
+        env.setdefault("KC_HEALTH_ENABLED", "true")
+        env.setdefault("KC_METRICS_ENABLED", "true")
+        env.update(KeycloakProvider._build_options_env(spec, ctx, kc_name))
+        return env
+
+    @staticmethod
+    def _build_service_ports(env, tls_enabled):
+        """Build K8s-style Service port list from Keycloak env vars."""
+        svc_ports = []
+        if tls_enabled:
+            https_port = int(env.get("KC_HTTPS_PORT", 8443))
+            svc_ports.append({"name": "https", "port": https_port,
+                              "targetPort": https_port})
+        http_enabled = env.get("KC_HTTP_ENABLED", "false") == "true"
+        if http_enabled or not tls_enabled:
+            http_port = int(env.get("KC_HTTP_PORT", 8080))
+            svc_ports.append({"name": "http", "port": http_port,
+                              "targetPort": http_port})
+        if "KC_HTTP_MANAGEMENT_PORT" in env:
+            mgmt_port = int(env["KC_HTTP_MANAGEMENT_PORT"])
+            svc_ports.append({"name": "management", "port": mgmt_port,
+                              "targetPort": mgmt_port})
+        else:
+            # No dedicated management port — metrics served on main listener.
+            # Map "management" to the main port so ServiceMonitors referencing
+            # port "management" resolve.
+            main_port = (int(env.get("KC_HTTPS_PORT", 8443)) if tls_enabled
+                         else int(env.get("KC_HTTP_PORT", 8080)))
+            svc_ports.append({"name": "management", "port": main_port,
+                              "targetPort": main_port})
+        return svc_ports
