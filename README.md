@@ -59,16 +59,16 @@ python3 helmfile2compose.py --extensions-dir ./dekube-provider-keycloak --helmfi
 
 ## Code quality
 
-*Last updated: 2026-02-23*
+*Last updated: 2026-09-24 — re-measured after splitting `_build_options_env` (was D/21) into `_build_feature_env` / `_build_additional_options_env` / `_build_pod_env_overrides`, byte-identical output. `_build_pod_template_volumes`'s CC (20, C) is unrelated to this change — the previous entry on this page (12, C) was stale.*
 
 | Metric | Value |
 |--------|-------|
-| Pylint | 9.97/10 |
+| Pylint | 9.90/10 |
 | Pyflakes | clean |
-| Radon MI | 32.23 (A) |
-| Radon avg CC | 4.6 (A) |
+| Radon MI | 23.95 (A) |
+| Radon avg CC | 5.8 (B) |
 
-Worst CC: `_build_pod_template_volumes` (12, C), `_build_options_env` (11, C).
+Worst CC: `_build_pod_template_volumes` (20, C), `_build_http_env` (13, C), `_build_pod_env_overrides` (12, C). No function rated D or worse.
 
 The `E0401: Unable to import 'dekube'` is expected — extensions import from dekube-engine at runtime, not at lint time.
 

@@ -399,8 +399,8 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
         return env
 
     @staticmethod
-    def _build_options_env(spec, ctx, kc_name="keycloak"):
-        """Map features, additionalOptions, podTemplate env, bootstrap admin."""
+    def _build_feature_env(spec):
+        """Map spec.features → KC_FEATURES / KC_FEATURES_DISABLED."""
         env = {}
         features = spec.get("features") or {}
         enabled = features.get("enabled")
@@ -409,7 +409,12 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
         disabled = features.get("disabled")
         if disabled:
             env["KC_FEATURES_DISABLED"] = ",".join(disabled)
+        return env
 
+    @staticmethod
+    def _build_additional_options_env(spec, ctx):
+        """Map spec.additionalOptions → KC_<NAME> env vars (literal value or secret ref)."""
+        env = {}
         for opt in spec.get("additionalOptions") or []:
             if not opt:
                 continue
@@ -420,7 +425,12 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
                 val = KeycloakProvider._secret_ref(opt["secret"], ctx)
                 if val:
                     env[env_name] = val
+        return env
 
+    @staticmethod
+    def _build_pod_env_overrides(spec):
+        """Map unsupported.podTemplate's keycloak container env (literal values only)."""
+        env = {}
         pod_spec = ((spec.get("unsupported") or {})
                     .get("podTemplate") or {}).get("spec") or {}
         for container in pod_spec.get("containers") or []:
@@ -432,7 +442,15 @@ class KeycloakProvider(Provider):  # pylint: disable=too-few-public-methods  # c
                         continue
                     if "value" in e:
                         env[e["name"]] = e["value"]
+        return env
 
+    @staticmethod
+    def _build_options_env(spec, ctx, kc_name="keycloak"):
+        """Map features, additionalOptions, podTemplate env, bootstrap admin."""
+        env = {}
+        env.update(KeycloakProvider._build_feature_env(spec))
+        env.update(KeycloakProvider._build_additional_options_env(spec, ctx))
+        env.update(KeycloakProvider._build_pod_env_overrides(spec))
         env.update(KeycloakProvider._resolve_bootstrap_admin(spec, ctx, kc_name))
         return env
 
