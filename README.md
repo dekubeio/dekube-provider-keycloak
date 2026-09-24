@@ -41,7 +41,7 @@ Replaces the Keycloak Operator's reconciliation logic with a direct compose serv
 
 ## Dependencies
 
-None. Uses stdlib only (`base64`, `json`, `os`, `secrets`, `string`, `sys`). Imports `ConvertResult` and `_apply_replacements` from `dekube`.
+None. Uses stdlib only (`json`, `os`, `sys`). Imports `ProviderResult`, `Provider`, `apply_replacements`, `secret_value`, `generate_password`, `write_configmap_files`, `write_secret_files` from `dekube`.
 
 ## Usage
 
